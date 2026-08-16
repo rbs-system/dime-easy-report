@@ -7,6 +7,7 @@ import pandas as pd
 import streamlit as st
 from google_auth_oauthlib.flow import Flow
 from googleapiclient.discovery import build
+from google.oauth2.credentials import Credentials
 
 # ==========================================
 # 1. Page Configuration
@@ -39,9 +40,19 @@ def get_oauth_flow():
 
 def get_gmail_service():
     """ดึง Gmail Service จาก Credentials ใน Session State"""
-    if "credentials" not in st.session_state:
+    if "credentials" not in st.session_state or st.session_state.credentials is None:
         return None
-    return build('gmail', 'v1', credentials=st.session_state.credentials)
+    
+    creds_data = st.session_state.credentials
+    creds = Credentials(
+        token=creds_data['token'],
+        refresh_token=creds_data.get('refresh_token'),
+        token_uri=creds_data.get('token_uri'),
+        client_id=creds_data.get('client_id'),
+        client_secret=creds_data.get('client_secret'),
+        scopes=creds_data.get('scopes')
+    )
+    return build('gmail', 'v1', credentials=creds)
 
 # ==========================================
 # 3. PDF Extraction Functions
@@ -56,7 +67,6 @@ def extract_pdf_data(pdf_stream, pdf_password=""):
                 if not text:
                     continue
                 
-                # ค้นหาข้อมูลวันทำรายการ และรายการหุ้น
                 lines = text.split('\n')
                 date_str = None
                 for line in lines:
@@ -65,7 +75,6 @@ def extract_pdf_data(pdf_stream, pdf_password=""):
                         if match:
                             date_str = match.group(0)
                     
-                    # ตรวจสอบบรรทัดที่มีรายการซื้อ/ขาย (Buy/Sell)
                     if any(action in line.upper() for action in ["BUY", "SELL"]):
                         parts = line.split()
                         if len(parts) >= 5:
@@ -81,9 +90,9 @@ def fetch_all_pdfs(pdf_password=""):
     """ค้นหาอีเมล Confirmation Note จาก Dime และอ่านไฟล์แนบ PDF"""
     service = get_gmail_service()
     if not service:
+        st.error("ไม่สามารถเชื่อมต่อ Gmail ได้ กรุณาล็อกอินใหม่อีกครั้ง")
         return []
 
-    # ค้นหาอีเมลจาก Dime
     query = 'from:dime subject:"Confirmation Note"'
     results = service.users().messages().list(userId='me', q=query).execute()
     messages = results.get('messages', [])
@@ -106,7 +115,6 @@ def fetch_all_pdfs(pdf_password=""):
                     file_data = base64.urlsafe_b64decode(attachment['data'].encode('UTF-8'))
                     pdf_stream = io.BytesIO(file_data)
                     
-                    # สกัดข้อมูลจาก PDF
                     records = extract_pdf_data(pdf_stream, pdf_password)
                     all_records.extend(records)
                     
@@ -116,7 +124,33 @@ def fetch_all_pdfs(pdf_password=""):
     return all_records
 
 # ==========================================
-# 4. Main Application UI & Logic
+# 4. Authentication Flow Processing
+# ==========================================
+# ตรวจสอบการรับ Auth Code จาก Google Redirect URL
+if "code" in st.query_params and "credentials" not in st.session_state:
+    try:
+        auth_code = st.query_params["code"]
+        flow = get_oauth_flow()
+        flow.fetch_token(code=auth_code)
+        creds = flow.credentials
+        
+        # แปลงเป็น dict เพื่อเก็บใน Session State อย่างปลอดภัย
+        st.session_state.credentials = {
+            'token': creds.token,
+            'refresh_token': creds.refresh_token,
+            'token_uri': creds.token_uri,
+            'client_id': creds.client_id,
+            'client_secret': creds.client_secret,
+            'scopes': creds.scopes
+        }
+        # เคลียร์ query params เพื่อไม่ให้วนลูป
+        st.query_params.clear()
+        st.rerun()
+    except Exception as e:
+        st.error(f"เกิดข้อผิดพลาดขณะรับสิทธิ์การล็อกอิน: {e}")
+
+# ==========================================
+# 5. Main Application UI & Logic
 # ==========================================
 st.title("📈 Dime Stock Portfolio Dashboard")
 st.caption("ระบบติดตามและคำนวณพอร์ตการลงทุนหุ้นต่างประเทศจากเอกสาร Dime Confirmation Note")
@@ -130,28 +164,19 @@ with st.sidebar:
     btn_process = st.button("🚀 ประมวลผลพอร์ตการลงทุน", type="primary")
 
 # ------------------------------------------
-# Authentication Check
+# Main UI Gatekeeper
 # ------------------------------------------
-# เช็กว่า Google ส่ง code กลับมาใน URL หรือไม่
-if "code" in st.query_params and "credentials" not in st.session_state:
-    try:
-        auth_code = st.query_params.get("code")
-        flow = get_oauth_flow()
-        flow.fetch_token(code=auth_code)
-        st.session_state.credentials = flow.credentials
-    except Exception as e:
-        st.error(f"เกิดข้อผิดพลาดในการดึง Token: {e}")
-
-# ถ้ายังไม่มี credentials ให้แสดงปุ่มล็อกอิน
 if "credentials" not in st.session_state:
     st.info("👋 กรุณาเข้าสู่ระบบด้วย Google เพื่อดึงข้อมูลสลิป Confirmation Note จาก Gmail ของคุณ")
     flow = get_oauth_flow()
     auth_url, _ = flow.authorization_url(prompt="consent")
     st.link_button("🔑 เข้าสู่ระบบด้วย Google", auth_url, type="primary")
     st.stop()
+else:
+    st.success("✅ เชื่อมต่อกับ Google Gmail เรียบร้อยแล้ว พร้อมประมวลผลข้อมูล")
 
 # ------------------------------------------
-# Main Content / Processing
+# Processing Action
 # ------------------------------------------
 if btn_process:
     if not pdf_password:
