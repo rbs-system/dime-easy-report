@@ -124,12 +124,13 @@ def fetch_all_pdfs(pdf_password=""):
 # ==========================================
 # 4. OAuth Callback Handler
 # ==========================================
-query_params = st.query_params
-if "code" in query_params and "credentials" not in st.session_state:
-    code = query_params["code"]
+# ดึงค่า code จาก query params
+auth_code = st.query_params.get("code")
+
+if auth_code and "credentials" not in st.session_state:
     try:
         flow = get_oauth_flow()
-        flow.fetch_token(code=code)
+        flow.fetch_token(code=auth_code)
         creds = flow.credentials
         
         st.session_state["credentials"] = {
@@ -143,7 +144,7 @@ if "code" in query_params and "credentials" not in st.session_state:
         st.query_params.clear()
         st.rerun()
     except Exception as e:
-        st.error(f"เกิดข้อผิดพลาดในการดึง Access Token: {e}")
+        st.error(f"เกิดข้อผิดพลาดในการรับรองสิทธิ์: {e}")
 
 # ==========================================
 # 5. Main Application UI & Logic
@@ -164,7 +165,7 @@ with st.sidebar:
 # ------------------------------------------
 if "credentials" not in st.session_state:
     st.info("👋 กรุณาเข้าสู่ระบบด้วย Google เพื่อดึงข้อมูลสลิป Confirmation Note จาก Gmail ของคุณ")
-    
+    https://github.com/rbs-system/dime-easy-report/blob/main/app.py
     flow = get_oauth_flow()
     auth_url, _ = flow.authorization_url(prompt="consent", access_type="offline")
     
