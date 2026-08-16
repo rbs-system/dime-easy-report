@@ -132,20 +132,23 @@ with st.sidebar:
 # ------------------------------------------
 # Authentication Check
 # ------------------------------------------
-if "credentials" not in st.session_state:
-    # หากเปิดกลับมาจากหน้าล็อกอิน Google OAuth
-    if "code" in st.query_params:
+# เช็กว่า Google ส่ง code กลับมาใน URL หรือไม่
+if "code" in st.query_params and "credentials" not in st.session_state:
+    try:
+        auth_code = st.query_params.get("code")
         flow = get_oauth_flow()
-        flow.fetch_token(code=st.query_params["code"])
+        flow.fetch_token(code=auth_code)
         st.session_state.credentials = flow.credentials
-        st.rerun()
-    else:
-        # แสดงหน้าขอให้ล็อกอิน
-        st.info("👋 กรุณาเข้าสู่ระบบด้วย Google เพื่อดึงข้อมูลสลิป Confirmation Note จาก Gmail ของคุณ")
-        flow = get_oauth_flow()
-        auth_url, _ = flow.authorization_url(prompt="consent")
-        st.link_button("🔑 เข้าสู่ระบบด้วย Google", auth_url, type="primary")
-        st.stop()
+    except Exception as e:
+        st.error(f"เกิดข้อผิดพลาดในการดึง Token: {e}")
+
+# ถ้ายังไม่มี credentials ให้แสดงปุ่มล็อกอิน
+if "credentials" not in st.session_state:
+    st.info("👋 กรุณาเข้าสู่ระบบด้วย Google เพื่อดึงข้อมูลสลิป Confirmation Note จาก Gmail ของคุณ")
+    flow = get_oauth_flow()
+    auth_url, _ = flow.authorization_url(prompt="consent")
+    st.link_button("🔑 เข้าสู่ระบบด้วย Google", auth_url, type="primary")
+    st.stop()
 
 # ------------------------------------------
 # Main Content / Processing
