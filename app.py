@@ -8,9 +8,10 @@ import streamlit as st
 from google_auth_oauthlib.flow import Flow
 from googleapiclient.discovery import build
 from google.oauth2.credentials import Credentials
+from google.auth.transport.requests import Request
 
 # ==========================================
-# 1. Page Configuration
+# 1. Page Configuration & Cookie Setup
 # ==========================================
 st.set_page_config(
     page_title="Dime Stock Portfolio Dashboard",
@@ -23,7 +24,7 @@ SCOPES = ['https://www.googleapis.com/auth/gmail.readonly']
 # ==========================================
 # 2. OAuth & Gmail Helper Functions
 # ==========================================
-def get_oauth_flow():
+def get_oauth_flow(state=None):
     """สร้าง OAuth Flow จาก Streamlit Secrets"""
     return Flow.from_client_config(
         {
@@ -35,24 +36,51 @@ def get_oauth_flow():
             }
         },
         scopes=SCOPES,
+        state=state,
         redirect_uri=st.secrets["google_oauth"]["redirect_uri"]
     )
 
+def save_credentials(creds):
+    st.session_state["token"] = creds.token
+    if creds.refresh_token:
+        st.session_state["refresh_token"] = creds.refresh_token
+
+
 def get_gmail_service():
-    """ดึง Gmail Service จาก Credentials ใน Session State"""
-    if "credentials" not in st.session_state:
+    """สร้าง Gmail service จาก session และ refresh token เมื่อจำเป็น"""
+    token = st.session_state.get("token")
+    refresh_token = st.session_state.get("refresh_token")
+
+    if not token and not refresh_token:
         return None
-    
-    creds_dict = st.session_state["credentials"]
-    creds = Credentials(
-        token=creds_dict["token"],
-        refresh_token=creds_dict.get("refresh_token"),
-        token_uri="https://oauth2.googleapis.com/token",
-        client_id=st.secrets["google_oauth"]["client_id"],
-        client_secret=st.secrets["google_oauth"]["client_secret"],
-        scopes=SCOPES
-    )
-    return build('gmail', 'v1', credentials=creds)
+
+    try:
+        creds = Credentials(
+            token=token,
+            refresh_token=refresh_token,
+            token_uri="https://oauth2.googleapis.com/token",
+            client_id=st.secrets["google_oauth"]["client_id"],
+            client_secret=st.secrets["google_oauth"]["client_secret"],
+            scopes=SCOPES,
+        )
+
+        if creds.expired and creds.refresh_token:
+            creds.refresh(Request())
+            save_credentials(creds)
+
+        if not creds.valid:
+            return None
+
+        return build("gmail", "v1", credentials=creds, cache_discovery=False)
+    except Exception as e:
+        st.session_state["auth_error"] = f"ไม่สามารถเชื่อมต่อ Gmail ได้: {e}"
+        return None
+
+
+def logout():
+    for key in ["token", "refresh_token", "oauth_state", "oauth_just_completed", "auth_error"]:
+        st.session_state.pop(key, None)
+
 
 # ==========================================
 # 3. PDF Extraction Functions
@@ -122,33 +150,47 @@ def fetch_all_pdfs(pdf_password=""):
     return all_records
 
 # ==========================================
-# 4. OAuth Callback Handler
+# 4. Authentication Flow Processing
 # ==========================================
-# ดึงค่า code จาก query params
-auth_code = st.query_params.get("code")
+if "error" in st.query_params:
+    error = st.query_params.get("error")
+    desc = st.query_params.get("error_description", "")
+    st.session_state["auth_error"] = f"Google ยกเลิก/ปฏิเสธการเข้าสู่ระบบ: {error} {desc}"
+    st.query_params.clear()
 
-if auth_code and "credentials" not in st.session_state:
+elif "code" in st.query_params:
     try:
-        flow = get_oauth_flow()
+        auth_code = st.query_params.get("code")
+        returned_state = st.query_params.get("state")
+        saved_state = st.session_state.get("oauth_state")
+
+        if saved_state and returned_state != saved_state:
+            raise RuntimeError("OAuth state ไม่ตรงกัน กรุณากด Login ใหม่อีกครั้ง")
+
+        flow = get_oauth_flow(state=saved_state)
         flow.fetch_token(code=auth_code)
         creds = flow.credentials
-        
-        st.session_state["credentials"] = {
-            "token": creds.token,
-            "refresh_token": creds.refresh_token,
-            "token_uri": creds.token_uri,
-            "client_id": creds.client_id,
-            "client_secret": creds.client_secret,
-            "scopes": creds.scopes
-        }
+
+        if not creds.token:
+            raise RuntimeError("Google ไม่ได้ส่ง access token กลับมา")
+
+        save_credentials(creds)
+        st.session_state["oauth_just_completed"] = True
+        st.session_state.pop("oauth_state", None)
         st.query_params.clear()
         st.rerun()
+
     except Exception as e:
-        st.error(f"เกิดข้อผิดพลาดในการรับรองสิทธิ์: {e}")
+        st.session_state["auth_error"] = f"เกิดข้อผิดพลาดขณะรับสิทธิ์การล็อกอิน: {e}"
+        st.query_params.clear()
 
 # ==========================================
 # 5. Main Application UI & Logic
 # ==========================================
+auth_error = st.session_state.pop("auth_error", None)
+if auth_error:
+    st.error(auth_error)
+
 st.title("📈 Dime Stock Portfolio Dashboard")
 st.caption("ระบบติดตามและคำนวณพอร์ตการลงทุนหุ้นต่างประเทศจากเอกสาร Dime Confirmation Note")
 
@@ -163,18 +205,26 @@ with st.sidebar:
 # ------------------------------------------
 # Main UI Gatekeeper
 # ------------------------------------------
-if "credentials" not in st.session_state:
+if st.session_state.pop("oauth_just_completed", False):
+    st.success("✅ เข้าสู่ระบบ Google สำเร็จแล้ว พร้อมใช้งาน Gmail")
+
+has_token = st.session_state.get("token") or st.session_state.get("refresh_token")
+
+if not has_token:
     st.info("👋 กรุณาเข้าสู่ระบบด้วย Google เพื่อดึงข้อมูลสลิป Confirmation Note จาก Gmail ของคุณ")
-    
     flow = get_oauth_flow()
-    auth_url, _ = flow.authorization_url(prompt="consent", access_type="offline")
-    
+    auth_url, state = flow.authorization_url(
+        prompt="consent",
+        access_type="offline",
+        include_granted_scopes="true",
+    )
+    st.session_state["oauth_state"] = state
     st.link_button("🔑 เข้าสู่ระบบด้วย Google", auth_url, type="primary")
     st.stop()
 else:
     st.success("✅ เชื่อมต่อกับ Google Gmail เรียบร้อยแล้ว พร้อมประมวลผลข้อมูล")
-    if st.button("🚪 ออกจากระบบ"):
-        del st.session_state["credentials"]
+    if st.sidebar.button("🚪 Logout"):
+        logout()
         st.rerun()
 
 # ------------------------------------------
