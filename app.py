@@ -165,7 +165,7 @@ with st.sidebar:
 # ------------------------------------------
 if "credentials" not in st.session_state:
     st.info("👋 กรุณาเข้าสู่ระบบด้วย Google เพื่อดึงข้อมูลสลิป Confirmation Note จาก Gmail ของคุณ")
-    https:/github.com/rbs-system/dime-easy-report/blob/main/app.py
+    
     flow = get_oauth_flow()
     auth_url, _ = flow.authorization_url(prompt="consent", access_type="offline")
     
