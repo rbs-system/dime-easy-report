@@ -1,0 +1,5 @@
+token.json
+credentials.json
+downloaded_pdfs/
+.venv/
+__pycache__/
