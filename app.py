@@ -124,7 +124,6 @@ def fetch_all_pdfs(pdf_password=""):
 # ==========================================
 # 4. OAuth Callback Handler
 # ==========================================
-# ตรวจสอบว่ามี code ส่งกลับมาใน URL หรือไม่
 query_params = st.query_params
 if "code" in query_params and "credentials" not in st.session_state:
     code = query_params["code"]
@@ -133,7 +132,6 @@ if "code" in query_params and "credentials" not in st.session_state:
         flow.fetch_token(code=code)
         creds = flow.credentials
         
-        # บันทึก token เก็บลง session_state แบบ dict
         st.session_state["credentials"] = {
             "token": creds.token,
             "refresh_token": creds.refresh_token,
@@ -142,6 +140,8 @@ if "code" in query_params and "credentials" not in st.session_state:
             "client_secret": creds.client_secret,
             "scopes": creds.scopes
         }
+        st.query_params.clear()
+        st.rerun()
     except Exception as e:
         st.error(f"เกิดข้อผิดพลาดในการดึง Access Token: {e}")
 
@@ -168,21 +168,7 @@ if "credentials" not in st.session_state:
     flow = get_oauth_flow()
     auth_url, _ = flow.authorization_url(prompt="consent", access_type="offline")
     
-    # ใช้ HTML Link Direct เปิดแทน iframe เพื่อป้องกันการวนลูป
-    st.markdown(
-        f'''
-        <a href="{auth_url}" target="_self" style="
-            display: inline-block;
-            padding: 0.5em 1em;
-            color: white;
-            background-color: #FF4B4B;
-            border-radius: 8px;
-            text-decoration: none;
-            font-weight: bold;
-        ">🔑 เข้าสู่ระบบด้วย Google</a>
-        ''', 
-        unsafe_allow_html=True
-    )
+    st.link_button("🔑 เข้าสู่ระบบด้วย Google", auth_url, type="primary")
     st.stop()
 else:
     st.success("✅ เชื่อมต่อกับ Google Gmail เรียบร้อยแล้ว พร้อมประมวลผลข้อมูล")
