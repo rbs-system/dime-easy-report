@@ -5,12 +5,14 @@ import base64
 import pdfplumber
 import pandas as pd
 import streamlit as st
-from streamlit_oauth import OAuth2Component
+from google_auth_oauthlib.flow import Flow
 from googleapiclient.discovery import build
 from google.oauth2.credentials import Credentials
+from google.auth.transport.requests import Request
+from streamlit_cookies_controller import CookieController
 
 # ==========================================
-# 1. Page Configuration
+# 1. Page Configuration & Cookie Setup
 # ==========================================
 st.set_page_config(
     page_title="Dime Stock Portfolio Dashboard",
@@ -18,36 +20,57 @@ st.set_page_config(
     layout="wide"
 )
 
-# Read secrets
-CLIENT_ID = st.secrets["google_oauth"]["client_id"]
-CLIENT_SECRET = st.secrets["google_oauth"]["client_secret"]
-REDIRECT_URI = st.secrets["google_oauth"]["redirect_uri"]
-AUTHORIZE_URL = "https://accounts.google.com/o/oauth2/v2/auth"
-TOKEN_URL = "https://oauth2.googleapis.com/token"
-REFRESH_TOKEN_URL = "https://oauth2.googleapis.com/token"
-REVOKE_TOKEN_URL = "https://oauth2.googleapis.com/revoke"
-SCOPE = "https://www.googleapis.com/auth/gmail.readonly"
-
-oauth2 = OAuth2Component(CLIENT_ID, CLIENT_SECRET, AUTHORIZE_URL, TOKEN_URL, REFRESH_TOKEN_URL, REVOKE_TOKEN_URL)
+controller = CookieController()
+SCOPES = ['https://www.googleapis.com/auth/gmail.readonly']
 
 # ==========================================
-# 2. Gmail Helper Functions
+# 2. OAuth & Gmail Helper Functions
 # ==========================================
-def get_gmail_service():
-    """ดึง Gmail Service จาก Credentials ใน Session State"""
-    token_info = st.session_state.get("token")
-    if not token_info or "access_token" not in token_info:
-        return None
-    
-    creds = Credentials(
-        token=token_info["access_token"],
-        refresh_token=token_info.get("refresh_token"),
-        token_uri=TOKEN_URL,
-        client_id=CLIENT_ID,
-        client_secret=CLIENT_SECRET,
-        scopes=[SCOPE]
+def get_oauth_flow():
+    """สร้าง OAuth Flow จาก Streamlit Secrets"""
+    return Flow.from_client_config(
+        {
+            "web": {
+                "client_id": st.secrets["google_oauth"]["client_id"],
+                "client_secret": st.secrets["google_oauth"]["client_secret"],
+                "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+                "token_uri": "https://oauth2.googleapis.com/token",
+            }
+        },
+        scopes=SCOPES,
+        redirect_uri=st.secrets["google_oauth"]["redirect_uri"]
     )
-    return build('gmail', 'v1', credentials=creds)
+
+def get_gmail_service():
+    """ดึง Gmail Service จาก Session State หรือ Cookie และ refresh token เมื่อหมดอายุ"""
+    token = st.session_state.get("token") or controller.get("gmail_token")
+    refresh_token = st.session_state.get("refresh_token") or controller.get("gmail_refresh_token")
+
+    if not token and not refresh_token:
+        return None
+
+    try:
+        creds = Credentials(
+            token=token,
+            refresh_token=refresh_token,
+            token_uri="https://oauth2.googleapis.com/token",
+            client_id=st.secrets["google_oauth"]["client_id"],
+            client_secret=st.secrets["google_oauth"]["client_secret"],
+            scopes=SCOPES,
+        )
+
+        if creds.expired and creds.refresh_token:
+            creds.refresh(Request())
+            st.session_state["token"] = creds.token
+            controller.set("gmail_token", creds.token)
+
+        if not creds.valid:
+            return None
+
+        return build("gmail", "v1", credentials=creds)
+    except Exception:
+        return None
+
 
 # ==========================================
 # 3. PDF Extraction Functions
@@ -117,7 +140,31 @@ def fetch_all_pdfs(pdf_password=""):
     return all_records
 
 # ==========================================
-# 4. Main Application UI & Logic
+# 4. Authentication Flow Processing
+# ==========================================
+# ตรวจสอบว่า Google ส่ง Auth Code กลับมาหรือไม่
+if "code" in st.query_params:
+    try:
+        auth_code = st.query_params["code"]
+        flow = get_oauth_flow()
+        flow.fetch_token(code=auth_code)
+        creds = flow.credentials
+        
+        # บันทึกลง Cookie และ Session State
+        controller.set('gmail_token', creds.token)
+        if creds.refresh_token:
+            controller.set('gmail_refresh_token', creds.refresh_token)
+            st.session_state['refresh_token'] = creds.refresh_token
+        st.session_state['token'] = creds.token
+
+        st.query_params.clear()
+        st.session_state["oauth_just_completed"] = True
+        st.stop()
+    except Exception as e:
+        st.error(f"เกิดข้อผิดพลาดขณะรับสิทธิ์การล็อกอิน: {e}")
+
+# ==========================================
+# 5. Main Application UI & Logic
 # ==========================================
 st.title("📈 Dime Stock Portfolio Dashboard")
 st.caption("ระบบติดตามและคำนวณพอร์ตการลงทุนหุ้นต่างประเทศจากเอกสาร Dime Confirmation Note")
@@ -131,26 +178,27 @@ with st.sidebar:
     btn_process = st.button("🚀 ประมวลผลพอร์ตการลงทุน", type="primary")
 
 # ------------------------------------------
-# OAuth Gatekeeper
+# Main UI Gatekeeper
 # ------------------------------------------
-if "token" not in st.session_state:
+has_token = (
+    controller.get("gmail_token")
+    or st.session_state.get("token")
+    or controller.get("gmail_refresh_token")
+    or st.session_state.get("refresh_token")
+)
+
+if st.session_state.pop("oauth_just_completed", False):
+    st.success("✅ เข้าสู่ระบบ Google สำเร็จแล้ว กรุณากดประมวลผลพอร์ตได้เลย")
+    st.stop()
+
+if not has_token:
     st.info("👋 กรุณาเข้าสู่ระบบด้วย Google เพื่อดึงข้อมูลสลิป Confirmation Note จาก Gmail ของคุณ")
-    result = oauth2.authorize_button(
-        name="🔑 เข้าสู่ระบบด้วย Google",
-        redirect_uri=REDIRECT_URI,
-        scope=SCOPE,
-        key="google_auth",
-        extras_params={"access_type": "offline", "prompt": "consent"}
-    )
-    if result and "token" in result:
-        st.session_state["token"] = result["token"]
-        st.rerun()
+    flow = get_oauth_flow()
+    auth_url, _ = flow.authorization_url(prompt="consent", access_type="offline")
+    st.link_button("🔑 เข้าสู่ระบบด้วย Google", auth_url, type="primary")
     st.stop()
 else:
     st.success("✅ เชื่อมต่อกับ Google Gmail เรียบร้อยแล้ว พร้อมประมวลผลข้อมูล")
-    if st.button("🚪 ออกจากระบบ"):
-        del st.session_state["token"]
-        st.rerun()
 
 # ------------------------------------------
 # Processing Action
